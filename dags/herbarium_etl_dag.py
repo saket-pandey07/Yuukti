@@ -10,22 +10,42 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 SOURCE_TABLE = "herbarium_tasks"
 TARGET_TABLE = "ci_herbarium_specimens"
 
-# barcode validation
-BARCODE_REGEX = re.compile(r"^LWG\d{8}[1-9]$")
-
 
 default_args = {
     "owner": "airflow",
 }
 
 
+# -------------------------------
+# Barcode Normalization Function
+# -------------------------------
+def normalize_barcode(barcode):
+
+    if not barcode or not barcode.startswith("LWG"):
+        return None
+
+    # extract digits after LWG
+    digits = re.sub(r"\D", "", barcode[3:])
+
+    # keep only last 9 digits
+    digits = digits[-9:]
+
+    # fill remaining with zeros from left
+    digits = digits.zfill(9)
+
+    return f"LWG{digits}"
+
+
+# -------------------------------
+# ETL PROCESS
+# -------------------------------
 def etl_process():
 
     hook = PostgresHook(postgres_conn_id="postgres_default")
     conn = hook.get_conn()
     cur = conn.cursor()
 
-    # -------- EXTRACT --------
+    # ---------- EXTRACT ----------
     cur.execute(f"SELECT * FROM {SOURCE_TABLE}")
     rows = cur.fetchall()
 
@@ -38,7 +58,7 @@ def etl_process():
         taxonomy_data = record.get("taxonomy_data")
         barcode = record.get("barcode")
 
-        # -------- TRANSFORM --------
+        # ---------- TRANSFORM ----------
 
         # TEXT → JSON
         try:
@@ -46,9 +66,8 @@ def etl_process():
         except:
             taxonomy_json = None
 
-        # barcode validation
-        if barcode and not BARCODE_REGEX.match(barcode):
-            barcode = None
+        # Barcode normalization
+        barcode = normalize_barcode(barcode)
 
         genus = record.get("genus")
         species = record.get("species")
@@ -57,7 +76,7 @@ def etl_process():
         if genus or species:
             specimen_name = f"{genus or ''} {species or ''}".strip()
 
-        # -------- LOAD --------
+        # ---------- LOAD ----------
 
         insert_query = f"""
         INSERT INTO {TARGET_TABLE} (
@@ -117,11 +136,15 @@ def etl_process():
     conn.close()
 
 
+# -------------------------------
+# DAG DEFINITION
+# -------------------------------
 with DAG(
     dag_id="herbarium_etl_dag",
     start_date=datetime(2024, 1, 1),
     schedule_interval=None,
     catchup=False,
+    default_args=default_args,
 ) as dag:
 
     run_etl = PythonOperator(
